@@ -1,0 +1,10 @@
+__pycache__/
+.idea/
+build/
+*.egg-info
+
+*.lock
+.DS_Store
+.direnv/
+.env
+data.json

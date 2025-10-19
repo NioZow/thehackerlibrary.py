@@ -1,0 +1,19 @@
+database_url: postgresql://thehackerlibrary:thehackerlibrary@localhost:5432/thehackerlibrary
+feeds:
+  - https://niozow.github.io/feed.xml
+  - https://itm4n.github.io/feed.xml
+  - https://dirkjanm.io/feed.xml
+rss:
+  - https://www.synacktiv.com/en/feed/lastblog.xml
+  - https://portswigger.net/research/rss
+  - https://jorianwoltjer.com/blog/rss.xml
+twitter:
+  client_id: ""
+  client_secret: ""
+  redirect_uri: ""
+  token: ""
+  id: ""
+youtube:
+  api_key: ""
+  playlists:
+    - PLO-h_HEvT1ysKxfLkI-uk3_vxzxoUHCD7
