@@ -43,6 +43,7 @@ def get_posts_from_playlist(playlist_id: str):
         "docs.google.com",
         "twitter.com",
         "x.com",
+        "googleapis.com",
         "openai.com",
         "gumroad.com",
         "hackerone.com",
@@ -61,6 +62,10 @@ def get_posts_from_playlist(playlist_id: str):
         "rss.com",
         "hacktricks.xyz",
         "nostarch.com",
+        "chromium.org",
+        "gitlab.com",
+        "google.com",
+        "a.co",
         "youtube.com",  # too many results sry i prefer reading
     ]
 

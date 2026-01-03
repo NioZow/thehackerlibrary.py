@@ -14,6 +14,8 @@ from thehackerlibrary.config import (
     X_CLIENT_ID,
     X_CLIENT_SECRET,
     X_REDIRECT_URI,
+    config,
+    write_config,
 )
 from thehackerlibrary.logger import logger
 from thehackerlibrary.model import Resources
@@ -44,6 +46,8 @@ class Twitter:
             logger.info(
                 f"Your twitter id is {self.user_id} please save in the configuration file."
             )
+            config["twitter"]["id"] = self.user_id
+            write_config(config)
 
     @classmethod
     def interactive_auth(cls):
@@ -84,34 +88,75 @@ class Twitter:
             "Paste in the full URL after you've authorized your App:\n"
         )
 
-        token = oauth.fetch_token(
+        response = oauth.fetch_token(
             token_url="https://api.twitter.com/2/oauth2/token",
             authorization_response=authorization_response,
             auth=HTTPBasicAuth(X_CLIENT_ID, X_CLIENT_SECRET),
             client_id=X_CLIENT_ID,
             include_client_id=True,
             code_verifier=code_verifier,
-        )["access_token"]
-
-        print(f"Your token is {token} you can save it in the .env as X_TOKEN.")
-        return cls(token)
-
-    async def get_posts_from_bookmarks(self) -> List[Resources]:
-        """Scrape bookmarks and return posts from those"""
-        res = requests.get(
-            f"https://api.twitter.com/2/users/{self.user_id}/bookmarks",
-            headers={"Authorization": f"Bearer {self.token}"},
         )
 
-        if res.status_code != 200:
-            raise Exception(f"Request returned an error: {res.status_code} {res.text}")
+        print(
+            f"Your access token is {response.get('access_token')} you can save it in the .env as 'token'."
+        )
+        print(
+            f"Your refresh token is {response.get('refresh_token')} you can save it in the .env as 'refresh_token'."
+        )
+        config["twitter"]["access_token"] = response.get("access_token")
+        config["twitter"]["refresh_token"] = response.get("refresh_token")
+        write_config(config)
 
-        data = res.json()
+        return cls(response["access_token"])
 
-        # with open("data.json", "r") as f:
+    @classmethod
+    def from_refresh_token(cls, refresh_token: str, user_id: Optional[str] = None):
+        """Get new access token using refresh token"""
+        response = requests.post(
+            "https://api.twitter.com/2/oauth2/token",
+            auth=HTTPBasicAuth(X_CLIENT_ID, X_CLIENT_SECRET),
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"Token refresh failed: {response.text}")
+
+        data = response.json()
+        print(f"New access token: {data['access_token']}")
+        print(f"New refresh token: {data['refresh_token']}")
+        config["twitter"]["access_token"] = data["access_token"]
+        config["twitter"]["refresh_token"] = data["refresh_token"]
+        write_config(config)
+
+        return cls(data["access_token"])
+
+    async def get_posts_from_bookmarks(self, max_results: int = 30) -> List[Resources]:
+        """Scrape bookmarks and return posts from those"""
+        # params = {"max_results": max_results, "tweet.fields": "created_at"}
+        #
+        # res = requests.get(
+        #     f"https://api.twitter.com/2/users/{self.user_id}/bookmarks",
+        #     headers={"Authorization": f"Bearer {self.token}"},
+        #     params=params,
+        # )
+        #
+        # if res.status_code != 200:
+        #     raise Exception(f"Request returned an error: {res.status_code} {res.text}")
+        #
+        # data = res.json()
+        #
+        # with open("bookmarks.json", "w") as f:
         #     import json
         #
-        #     data = json.loads(f.read())
+        #     f.write(json.dumps(data))
+
+        with open("bookmarks.json", "r") as f:
+            import json
+
+            data = json.loads(f.read())
 
         resources = []
 
@@ -126,11 +171,17 @@ class Twitter:
             for coro in asyncio.as_completed(tasks):
                 try:
                     url = await coro
-                    resource, exists = add_resource(url, type="Post")
-                    if not exists:
-                        resources.append(resource)
+                    if "/photo/" not in url:
+                        resource, exists = add_resource(url, type="Post")
+                        if not exists:
+                            resources.append(resource)
+                            logger.info(f"Added Resource '{resource.title}'")
+                        else:
+                            logger.warning(
+                                f"Resource '{resource.title}' ({resource.id}) already existed."
+                            )
 
                 except Exception as e:
-                    logger.warning(f"Error: {e}")
+                    logger.error(f"Resource error: {e}")
 
         return resources

@@ -31,5 +31,19 @@ YOUTUBE_PLAYLISTS = config["youtube"]["playlists"]
 X_CLIENT_ID = config.get("twitter", {}).get("client_id")
 X_CLIENT_SECRET = config.get("twitter", {}).get("client_secret")
 X_REDIRECT_URI = config.get("twitter", {}).get("redirect_uri")
-X_TOKEN = config.get("twitter", {}).get("token")
+X_ACCESS_TOKEN = config.get("twitter", {}).get("access_token")
+X_REFRESH_TOKEN = config.get("twitter", {}).get("refresh_token")
 X_ID = config.get("twitter", {}).get("id")
+
+WHITELIST_AUTHORS = config.get("whitelist", {}).get("authors", [])
+BLACKLIST_AUTHORS = config.get("blacklist", {}).get("authors", [])
+WHITELIST_PATHS = config.get("whitelist", {}).get("paths", [])
+BLACKLIST_PATHS = config.get("blacklist", {}).get("paths", [])
+
+RULES_AUTHOR_BY_DOMAIN = config.get("rules", {}).get("author_by_domain", [])
+RULES_AUTHOR_BY_XPATH = config.get("rules", {}).get("author_by_xpath", [])
+
+
+def write_config(conf):
+    with open(CONFIG_PATH, "w") as f:
+        f.write(yaml.safe_dump(conf))

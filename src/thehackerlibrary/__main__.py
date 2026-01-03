@@ -15,7 +15,7 @@ from thehackerlibrary.config import (
     FEEDS,
     RSS_FEEDS,
     X_ID,
-    X_TOKEN,
+    X_REFRESH_TOKEN,
     YOUTUBE_PLAYLISTS,
     engine,
 )
@@ -31,6 +31,7 @@ from thehackerlibrary.resources import (
     remove_orphaned_sections,
     remove_orphaned_tags,
     remove_orphaned_topics,
+    update_accepted_resources,
 )
 
 
@@ -112,8 +113,8 @@ def scrape(args):
 
     if args.twitter:
         twitter = (
-            Twitter(X_TOKEN, X_ID)
-            if X_TOKEN is not None
+            Twitter.from_refresh_token(X_REFRESH_TOKEN, X_ID)
+            if X_REFRESH_TOKEN is not None
             else Twitter.interactive_auth()
         )
 
@@ -201,6 +202,41 @@ def clean(args):
     logger.info(f"Removed {remove_orphaned_authors()} orphaned authors.")
 
 
+def update(args):
+    update_accepted_resources(dry_run=args.dry_run)
+
+
+@output_data
+def ls(args):
+    """List resources in the database with various filtering options."""
+    with Session(engine) as sess:
+        query = sess.query(Resources)
+
+        if args.no_tags:
+            query = query.filter(~Resources.tags.any())
+        if args.accepted:
+            query = query.filter(Resources.accepted == True)
+        if args.denied:
+            query = query.filter(Resources.accepted == False)
+        if args.pending:
+            query = query.filter(Resources.accepted == None)
+
+        resources = query.all()
+
+        return [
+            {
+                "id": resource.id,
+                "title": resource.title,
+                "url": resource.url,
+                "date": resource.date.isoformat() if resource.date else None,
+                "accepted": resource.accepted,
+                "authors": ", ".join([author.name for author in resource.authors]),
+                "tags": ", ".join([tag.name for tag in resource.tags]),
+            }
+            for resource in resources
+        ]
+
+
 def main():
     parser = argparse.ArgumentParser(description="TheHackerLibrary cli")
     subparsers = parser.add_subparsers(
@@ -208,6 +244,16 @@ def main():
     )
 
     clean = subparsers.add_parser("clean", help="Remove orphans tags and authors.")
+
+    update_resources_parser = subparsers.add_parser(
+        "update",
+        help="Update the accepted state of resources based on whitelist/blacklist.",
+    )
+    update_resources_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Perform a dry run without making actual changes to the database.",
+    )
 
     healthcheck = subparsers.add_parser(
         "healthcheck", help="Perform healthchecking on db posts"
@@ -274,6 +320,33 @@ def main():
         default=None,
     )
     scrape_parser.add_argument(
+        "--output",
+        "-o",
+        help="Output format (e.g. json, csv, table, yml)",
+        default="table",
+        choices=["json", "csv", "table", "yml", "yaml"],
+    )
+
+    list_parser = subparsers.add_parser("ls", help="List resources in the database.")
+    list_parser.add_argument(
+        "--no-tags", action="store_true", help="Show posts without any tags."
+    )
+
+    # Mutually exclusive group for accepted/denied/pending status
+    status_group = list_parser.add_mutually_exclusive_group()
+    status_group.add_argument(
+        "--accepted", action="store_true", help="Show accepted posts."
+    )
+    status_group.add_argument(
+        "--denied", action="store_true", help="Show denied posts."
+    )
+    status_group.add_argument(
+        "--pending",
+        action="store_true",
+        help="Show posts that have not yet been accepted.",
+    )
+
+    list_parser.add_argument(
         "--output",
         "-o",
         help="Output format (e.g. json, csv, table, yml)",

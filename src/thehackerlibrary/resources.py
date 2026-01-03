@@ -1,11 +1,32 @@
 from datetime import datetime
 from typing import List, Optional
+from urllib.parse import urlparse
 
+from lxml import html
 from newspaper import Article
 from sqlalchemy.orm import Session
 
-from thehackerlibrary.config import engine
+from thehackerlibrary.config import (
+    BLACKLIST_AUTHORS,
+    BLACKLIST_PATHS,
+    RULES_AUTHOR_BY_DOMAIN,
+    RULES_AUTHOR_BY_XPATH,
+    WHITELIST_AUTHORS,
+    WHITELIST_PATHS,
+    engine,
+)
+from thehackerlibrary.logger import logger
 from thehackerlibrary.model import Authors, Resources, Sections, Tags, Topics
+
+
+def get_author_from_xpath(html_content: str, domain: str) -> Optional[str]:
+    for data in RULES_AUTHOR_BY_XPATH:
+        if domain == data["domain"]:
+            tree = html.fromstring(html_content)
+            elements = tree.xpath(data["xpath"])
+            if elements:
+                return elements[0].text_content().strip()
+    return None
 
 
 def parse_pubdate(date_str):
@@ -21,6 +42,153 @@ def parse_pubdate(date_str):
             continue
 
     raise ValueError(f"Unable to parse date: {date_str}")
+
+
+def check_whitelist(url: str, authors: List[str]) -> Optional[bool]:
+    """Check the whitelisted/blacklisted state of a resource
+
+    Args:
+        url: Url of the resource
+        authors: Authors of the resource
+
+    Returns:
+        Whether the resource should be accepted.
+        So True means it is whitelisted, False means it is blacklisted and None means it is not know.
+    """
+    for blacklisted_path in BLACKLIST_PATHS:
+        if url.startswith(blacklisted_path):
+            return False
+    for whitelisted_path in WHITELIST_PATHS:
+        if url.startswith(whitelisted_path):
+            if len(authors) == 0:
+                logger.error(
+                    f"Resource {url} would have been accepted if it had authors."
+                )
+                return None
+            return True
+
+    # Author-based rules
+    if any(author in WHITELIST_AUTHORS for author in authors):
+        return True
+    elif any(author in BLACKLIST_AUTHORS for author in authors):
+        return False
+    else:
+        return None
+
+
+def get_author_from_domain(domain: str) -> Optional[str]:
+    for data in RULES_AUTHOR_BY_DOMAIN:
+        if domain == data["domain"]:
+            return data["author"]
+    return None
+
+
+def update_accepted_resources(
+    dry_run: bool = False, use_xpath_for_authors: bool = True
+) -> int:
+    """
+    Queries posts that have not yet been accepted (those whose accepted property is None)
+    and runs the whitelist/blacklist on them to change their accepted state.
+
+    Args:
+        dry_run: If True, changes will be logged but not committed to the database.
+
+    Returns:
+        The number of resources whose accepted state was updated.
+    """
+    changes_count = 0
+    # domains = set()
+    with Session(engine) as sess:
+        # Query for resources where 'accepted' is None
+        unaccepted_resources = (
+            sess.query(Resources).filter(Resources.accepted == None).all()
+        )
+
+        for resource in unaccepted_resources:
+            authors = [author.name for author in resource.authors]
+
+            # update authors based on domains
+            domain = urlparse(resource.url).netloc
+            # domains.add(domain)
+
+            # Attempt to get authors from domain-based rules first
+            if len(authors) == 0:
+                if author_name := get_author_from_domain(domain):
+                    # Check if author already exists in the database, create if not
+                    author_obj = sess.query(Authors).filter_by(name=author_name).first()
+                    if not author_obj:
+                        author_obj = Authors(name=author_name)
+                        sess.add(author_obj)
+                        logger.info(f"Created new author: {author_name}.")
+
+                    # Link author to the resource
+                    resource.authors.append(author_obj)
+                    logger.info(
+                        f"Added author {author_name} to {resource.url} via domain rule."
+                    )
+                    authors = [author_name]  # Update authors list for whitelist check
+
+                # If no author found yet and XPath extraction is enabled, try XPath rules
+                elif use_xpath_for_authors:
+                    # Check if the domain is configured for XPath author extraction
+                    is_xpath_configured = any(
+                        rule["domain"] == domain for rule in RULES_AUTHOR_BY_XPATH
+                    )
+
+                    if is_xpath_configured:
+                        # If enabled and domain is configured, attempt to download and parse the article
+                        article = Article(resource.url)
+                        try:
+                            article.download()
+                            article.parse()
+                            if author_name := get_author_from_xpath(
+                                article.html, domain
+                            ):
+                                # Check if author already exists in the database, create if not
+                                author_obj = (
+                                    sess.query(Authors)
+                                    .filter_by(name=author_name)
+                                    .first()
+                                )
+                                if not author_obj:
+                                    author_obj = Authors(name=author_name)
+                                    sess.add(author_obj)
+                                    logger.info(
+                                        f"Created new author via XPath: {author_name}."
+                                    )
+                                # Link author to the resource
+                                resource.authors.append(author_obj)
+                                logger.info(
+                                    f"Added author {author_name} to {resource.url} via XPath."
+                                )
+                                authors = [
+                                    author_name
+                                ]  # Update authors list for whitelist check
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to download or parse article {resource.url} for XPath author extraction: {e}"
+                            )
+
+            new_accepted_state = check_whitelist(resource.url, authors)
+
+            # update accepted state
+            if resource.accepted != new_accepted_state:
+                logger.info(
+                    f"Resource '{resource.title}' by {', '.join([author.name for author in resource.authors])} published at {resource.url} changed state to: {new_accepted_state}."
+                )
+                resource.accepted = new_accepted_state
+                changes_count += 1
+
+        if not dry_run:
+            sess.commit()
+            logger.info(f"Committed {changes_count} changes to the database.")
+        else:
+            sess.rollback()
+            logger.info(f"Dry run: {changes_count} changes would have been committed.")
+
+        # print(domains)
+
+    return changes_count
 
 
 def add_resource(
@@ -47,6 +215,8 @@ def add_resource(
             article.download()
             article.parse()
 
+            domain = urlparse(url).netloc
+
             # get the title if not already specified
             if not title:
                 title = article.title
@@ -60,8 +230,20 @@ def add_resource(
 
             # get the authors if not already specified
             if not authors:
-                # only the first author is usually right
-                authors = [article.authors[0]] if len(article.authors) > 0 else []
+                if author_from_domain := get_author_from_domain(domain):
+                    authors = [author_from_domain]
+                elif author_from_xpath := get_author_from_xpath(article.html, domain):
+                    authors = [author_from_xpath]
+                    logger.info(
+                        f"Author found for {url} using XPath: {author_from_xpath}."
+                    )
+                else:
+                    # only the first author is usually right
+                    authors = [article.authors[0]] if len(article.authors) > 0 else []
+
+            # automatically set as accepted if author or domain is whitelisted
+            if accepted is None:
+                accepted = check_whitelist(url, authors)
 
             resource = Resources(
                 type=type,

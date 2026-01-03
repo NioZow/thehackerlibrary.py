@@ -17,3 +17,16 @@ youtube:
   api_key: ""
   playlists:
     - PLO-h_HEvT1ysKxfLkI-uk3_vxzxoUHCD7
+whitelist:
+  paths:
+    - https://lab.ctbb.show/research
+    - https://www.synacktiv.com/en/publications
+  authors:
+    - Mizu
+rules:
+  author_by_domain:
+    - author: Jorian Woltjer
+      domain: jorianwoltjer.com
+  author_by_xpath:
+    - xpath: "/html/body/div/div[1]/div[2]/div/h3/a"
+      domain: portswigger.net

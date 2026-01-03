@@ -8,3 +8,4 @@ build/
 .direnv/
 .env
 data.json
+bookmarks.json
