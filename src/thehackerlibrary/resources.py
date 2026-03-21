@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 
 from lxml import html
 from newspaper import Article
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, make_transient
 
 from thehackerlibrary.config import (
     BLACKLIST_AUTHORS,
@@ -276,7 +276,15 @@ def add_resource(
                     resource.tags.append(tag)
 
             sess.commit()
-            sess.expunge(resource)
+        else:
+            logger.warning(
+                f"Resource '{resource.title}' ({resource.id}) already existed."
+            )
+
+        # Eagerly load all attributes before detaching from session
+        # Access them to ensure they're loaded into the object's __dict__
+        _ = resource.id, resource.title, resource.url, resource.date, resource.accepted
+        make_transient(resource)
 
         return resource, exists
 

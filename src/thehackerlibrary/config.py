@@ -34,6 +34,7 @@ X_REDIRECT_URI = config.get("twitter", {}).get("redirect_uri")
 X_ACCESS_TOKEN = config.get("twitter", {}).get("access_token")
 X_REFRESH_TOKEN = config.get("twitter", {}).get("refresh_token")
 X_ID = config.get("twitter", {}).get("id")
+X_LAST_BOOKMARK_ID = config.get("twitter", {}).get("last_bookmark_id")
 
 WHITELIST_AUTHORS = config.get("whitelist", {}).get("authors", [])
 BLACKLIST_AUTHORS = config.get("blacklist", {}).get("authors", [])

@@ -13,6 +13,7 @@ from requests_oauthlib import OAuth2Session
 from thehackerlibrary.config import (
     X_CLIENT_ID,
     X_CLIENT_SECRET,
+    X_LAST_BOOKMARK_ID,
     X_REDIRECT_URI,
     config,
     write_config,
@@ -34,13 +35,20 @@ class Twitter:
 
     def __init__(self, token: str, id: Optional[str] = None):
         self.token = token
-        self.user_id = (
-            id
-            or requests.get(
+
+        if id:
+            self.user_id = id
+        else:
+            body = requests.get(
                 "https://api.twitter.com/2/users/me",
                 headers={"Authorization": "Bearer {}".format(self.token)},
-            ).json()["data"]["id"]
-        )
+            ).json()
+
+            if data := body.get("data"):
+                self.user_id = data["id"]
+            else:
+                print(f"failed to get data from body: {body}")
+                raise Exception
 
         if not id:
             logger.info(
@@ -133,38 +141,71 @@ class Twitter:
 
         return cls(data["access_token"])
 
-    async def get_posts_from_bookmarks(self, max_results: int = 30) -> List[Resources]:
-        """Scrape bookmarks and return posts from those"""
-        # params = {"max_results": max_results, "tweet.fields": "created_at"}
-        #
-        # res = requests.get(
-        #     f"https://api.twitter.com/2/users/{self.user_id}/bookmarks",
-        #     headers={"Authorization": f"Bearer {self.token}"},
-        #     params=params,
-        # )
-        #
-        # if res.status_code != 200:
-        #     raise Exception(f"Request returned an error: {res.status_code} {res.text}")
-        #
-        # data = res.json()
-        #
-        # with open("bookmarks.json", "w") as f:
-        #     import json
-        #
-        #     f.write(json.dumps(data))
+    async def get_posts_from_bookmarks(self) -> List[Resources]:
+        """Scrape bookmarks and return posts from those.
 
-        with open("bookmarks.json", "r") as f:
-            import json
+        Fetches only bookmarks newer than the last run by comparing Snowflake tweet IDs.
+        Paginates with small pages and stops early once we reach already-seen tweets,
+        minimising billed resources.
+        """
+        last_bookmark_id = int(X_LAST_BOOKMARK_ID) if X_LAST_BOOKMARK_ID else None
+        newest_id_seen: Optional[int] = None
 
-            data = json.loads(f.read())
+        all_tweets = []
+        pagination_token = None
+        done = False
 
-        resources = []
+        while not done:
+            params: dict = {"max_results": 10, "tweet.fields": "created_at"}
+            if pagination_token:
+                params["pagination_token"] = pagination_token
+
+            res = requests.get(
+                f"https://api.twitter.com/2/users/{self.user_id}/bookmarks",
+                headers={"Authorization": f"Bearer {self.token}"},
+                params=params,
+            )
+
+            if res.status_code != 200:
+                raise Exception(
+                    f"Request returned an error: {res.status_code} {res.text}"
+                )
+
+            data = res.json()
+            tweets = data.get("data", [])
+
+            for tweet in tweets:
+                tweet_id = int(tweet["id"])
+
+                if newest_id_seen is None:
+                    newest_id_seen = tweet_id
+
+                # Bookmarks are newest-first; stop once we reach already-processed tweets
+                if last_bookmark_id and tweet_id <= last_bookmark_id:
+                    done = True
+                    break
+
+                all_tweets.append(tweet)
+
+            next_token = data.get("meta", {}).get("next_token")
+            if not next_token:
+                done = True
+            else:
+                pagination_token = next_token
+
+        if not all_tweets:
+            logger.info("No new bookmarks since last run.")
+            return []
+
+        logger.info(f"Fetched {len(all_tweets)} new bookmark(s) from the API.")
 
         post_urls = [
             url
-            for tweet in data["data"]
+            for tweet in all_tweets
             for url in re.findall(r"https?://t\.co/[a-zA-Z0-9]+", tweet["text"])
         ]
+
+        resources = []
 
         async with aiohttp.ClientSession() as http_sess:
             tasks = [resolve_url(http_sess, url) for url in post_urls]
@@ -180,8 +221,12 @@ class Twitter:
                             logger.warning(
                                 f"Resource '{resource.title}' ({resource.id}) already existed."
                             )
-
                 except Exception as e:
                     logger.error(f"Resource error: {e}")
+
+        # Persist the newest seen ID so the next run starts from here
+        if newest_id_seen:
+            config["twitter"]["last_bookmark_id"] = str(newest_id_seen)
+            write_config(config)
 
         return resources
