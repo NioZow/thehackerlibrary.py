@@ -13,6 +13,7 @@ from tabulate import tabulate
 
 from thehackerlibrary.config import (
     FEEDS,
+    HEALTHCHECK_BYPASS_DOMAINS,
     RSS_FEEDS,
     X_ID,
     X_REFRESH_TOKEN,
@@ -101,7 +102,21 @@ def import_data(args):
 
 def _apply_analysis(url: str, result: AnalysisResult) -> None:
     """Persist tags and/or quality verdict from an AnalysisResult to the database."""
+    from urllib.parse import urlparse
+
     from thehackerlibrary.model import Tags
+
+    if result.fetch_failed:
+        if urlparse(url).netloc in HEALTHCHECK_BYPASS_DOMAINS:
+            logger.info(f"Skipping rejection for bypassed domain: {url}")
+        else:
+            with Session(engine) as sess:
+                resource = sess.query(Resources).filter_by(url=url).first()
+                if resource:
+                    resource.accepted = False
+                    sess.commit()
+            logger.warning(f"Rejected '{url}': could not fetch the post.")
+        return
 
     with Session(engine) as sess:
         resource = sess.query(Resources).filter_by(url=url).first()
@@ -204,21 +219,32 @@ def healthcheck(args):
                     url,
                     res.status == 200 or res.headers.get("server") == "cloudflare",
                 )
-        except TimeoutError:
+        except (TimeoutError, aiohttp.ClientConnectorError):
             return (url, False)
         except Exception as e:
-            # don't know what happened
-            # log for later and return True in this case
+            # Unknown error — assume up to avoid false positives
             logger.warning(f"Error for {url}: {e}")
             return (url, True)
 
     async def healthcheck_async(args):
+        from urllib.parse import urlparse
+
         with Session(engine) as db_sess:
             async with aiohttp.ClientSession() as http_sess:
-                resources = (
-                    db_sess.query(Resources).filter(Resources.accepted == True).all()
-                )
-                tasks = [get_up(http_sess, resource.url) for resource in resources]
+                if args.post:
+                    urls = [args.post]
+                else:
+                    query = _build_filter_query(
+                        args,
+                        db_sess.query(Resources),
+                        default_accepted=True,  # default: accepted posts only
+                    )
+                    urls = [
+                        r.url for r in query.all()
+                        if urlparse(r.url).netloc not in HEALTHCHECK_BYPASS_DOMAINS
+                    ]
+
+                tasks = [get_up(http_sess, url) for url in urls]
 
                 for coro in asyncio.as_completed(tasks):
                     try:
@@ -226,7 +252,6 @@ def healthcheck(args):
                         if not up:
                             logger.warning(f"{url} is not up.")
 
-                            # post is not up, mark as rejected for further investigation
                             if args.mark_as_rejected:
                                 resource = (
                                     db_sess.query(Resources)
@@ -352,6 +377,39 @@ def ls(args):
         ]
 
 
+def _add_filter_args(p, post_help, default_hint=""):
+    """Attach shared filter arguments (--post, --accepted/--denied/--pending, --author, --since)."""
+    p.add_argument("--post", "-p", metavar="URL", type=str, help=post_help)
+    status = p.add_mutually_exclusive_group()
+    status.add_argument(
+        "--accepted",
+        action="store_true",
+        help="Process only accepted posts." + (f" {default_hint}" if default_hint else ""),
+    )
+    status.add_argument(
+        "--denied",
+        action="store_true",
+        help="Process only denied/rejected posts.",
+    )
+    status.add_argument(
+        "--pending",
+        action="store_true",
+        help="Process only pending posts (accepted field is NULL in the database).",
+    )
+    p.add_argument(
+        "--author",
+        metavar="NAME",
+        type=str,
+        help="Process only posts written by this exact author name.",
+    )
+    p.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        type=str,
+        help="Process only posts published on or after this date (inclusive).",
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="TheHackerLibrary cli")
     subparsers = parser.add_subparsers(
@@ -371,18 +429,29 @@ def main():
     )
 
     healthcheck = subparsers.add_parser(
-        "healthcheck", help="Perform healthchecking on db posts"
+        "healthcheck",
+        help="Check that resource URLs are still reachable.",
+        description=(
+            "Verifies that stored post URLs respond with HTTP 200. "
+            "Domains listed under healthcheck.bypass_domains in the config are always skipped. "
+            "Defaults to accepted posts. Use --pending to check unreviewed posts instead."
+        ),
     )
     healthcheck.add_argument(
         "-m",
         "--mark-as-rejected",
         action="store_true",
-        help="Mark matched posts as rejected.",
+        help="Automatically reject posts whose URL is no longer reachable.",
     )
     healthcheck.add_argument(
         "--disable-ssl-verification",
-        help="Disable SSL Certificate validation (fix bug).",
         action="store_true",
+        help="Disable SSL certificate validation (workaround for misconfigured servers).",
+    )
+    _add_filter_args(
+        healthcheck,
+        post_help="Check a single specific URL instead of querying the database.",
+        default_hint="By default, accepted posts are checked.",
     )
 
     resource_parser = subparsers.add_parser("role", help="Manage roles.")
@@ -442,46 +511,6 @@ def main():
         choices=["json", "csv", "table", "yml", "yaml"],
     )
 
-    def _add_ai_filter_args(p, post_help):
-        p.add_argument(
-            "--post", "-p", metavar="URL", type=str, help=post_help,
-        )
-        status = p.add_mutually_exclusive_group()
-        status.add_argument(
-            "--accepted",
-            action="store_true",
-            help=(
-                "Process only posts that have been accepted (approved for the library). "
-                "Without this flag the command does not filter by acceptance state, "
-                "unless the command has its own default (e.g. 'quality' defaults to pending)."
-            ),
-        )
-        status.add_argument(
-            "--denied",
-            action="store_true",
-            help="Process only posts that have been denied/rejected.",
-        )
-        status.add_argument(
-            "--pending",
-            action="store_true",
-            help=(
-                "Process only posts that are still pending review "
-                "(accepted field is NULL in the database)."
-            ),
-        )
-        p.add_argument(
-            "--author",
-            metavar="NAME",
-            type=str,
-            help="Process only posts written by this exact author name.",
-        )
-        p.add_argument(
-            "--since",
-            metavar="YYYY-MM-DD",
-            type=str,
-            help="Process only posts published on or after this date (inclusive).",
-        )
-
     analyze_parser = subparsers.add_parser(
         "analyze",
         help="Tag posts and evaluate their quality using AI.",
@@ -494,7 +523,7 @@ def main():
             "or --post to process a single URL directly."
         ),
     )
-    _add_ai_filter_args(
+    _add_filter_args(
         analyze_parser,
         post_help="Analyze a single specific post by URL, bypassing the database query.",
     )

@@ -21,6 +21,7 @@ class AnalysisResult:
     tags: List[str] = field(default_factory=list)
     accepted: bool = True  # True = good quality, False = reject
     reason: str = ""
+    fetch_failed: bool = False
 
 
 def analyze(
@@ -39,12 +40,17 @@ def analyze(
 
     Returns:
         AnalysisResult with tags, quality verdict, and reason.
-        On parse failure returns empty tags and accepted=True (fail open).
+        Sets fetch_failed=True if the article could not be downloaded.
+        On LLM parse failure returns empty tags and accepted=True (fail open).
     """
     if article_text is None or article_title is None:
         article = Article(url)
-        article.download()
-        article.parse()
+        try:
+            article.download()
+            article.parse()
+        except Exception as e:
+            logger.warning(f"Failed to fetch {url}: {e}")
+            return AnalysisResult(fetch_failed=True)
         article_title = article_title or article.title or url
         article_text = article_text or article.text or ""
 

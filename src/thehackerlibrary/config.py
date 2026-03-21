@@ -44,6 +44,8 @@ BLACKLIST_PATHS = config.get("blacklist", {}).get("paths", [])
 RULES_AUTHOR_BY_DOMAIN = config.get("rules", {}).get("author_by_domain", [])
 RULES_AUTHOR_BY_XPATH = config.get("rules", {}).get("author_by_xpath", [])
 
+HEALTHCHECK_BYPASS_DOMAINS = config.get("healthcheck", {}).get("bypass_domains", [])
+
 LITELLM_BASE_URL = config.get("litellm", {}).get("base_url", "http://localhost:4000")
 LITELLM_API_KEY = config.get("litellm", {}).get("api_key", "dummy")
 LITELLM_MODEL = config.get("litellm", {}).get("model", "claude-sonnet-4-6")
