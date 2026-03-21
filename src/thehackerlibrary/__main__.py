@@ -25,6 +25,7 @@ from thehackerlibrary.logger import logger
 from thehackerlibrary.media.twitter import Twitter
 from thehackerlibrary.media.youtube import get_posts_from_playlist
 from thehackerlibrary.model import Resources, User
+from thehackerlibrary.ai.analyzer import AnalysisResult, analyze
 from thehackerlibrary.resources import (
     add_resource,
     remove_orphaned_authors,
@@ -76,6 +77,9 @@ class Dispatcher:
             if args.action == "import":
                 # special handling because can't name it import
                 import_data(args)
+            elif args.action == "analyze":
+                # special handling because the function is named analyze_cmd
+                analyze_cmd(args)
             elif (func := globals().get(args.action)) is not None:
                 func(args)
             else:
@@ -95,8 +99,37 @@ def import_data(args):
     Importer(args.output_directory).import_all()
 
 
+def _apply_analysis(url: str, result: AnalysisResult) -> None:
+    """Persist tags and/or quality verdict from an AnalysisResult to the database."""
+    from thehackerlibrary.model import Tags
+
+    with Session(engine) as sess:
+        resource = sess.query(Resources).filter_by(url=url).first()
+        if not resource:
+            return
+
+        for tag_name in result.tags:
+            tag_obj = sess.query(Tags).filter_by(name=tag_name).first()
+            if not tag_obj:
+                tag_obj = Tags(name=tag_name)
+                sess.add(tag_obj)
+                logger.info(f"Created new tag: {tag_name}")
+            if tag_obj not in resource.tags:
+                resource.tags.append(tag_obj)
+
+        if not result.accepted:
+            resource.accepted = False
+            logger.warning(
+                f"Rejected '{resource.title}' ({url}): {result.reason}"
+            )
+
+        sess.commit()
+
+
 @output_data
 def scrape(args):
+    from thehackerlibrary.model import Tags
+
     resources = []
     if args.feed:
         for feed_url in FEEDS:
@@ -124,6 +157,19 @@ def scrape(args):
         resource, exists = add_resource(args.post, "Post", accepted=args.reviewed)
         if not exists:
             resources.append(resource)
+
+    if resources:
+        all_tags = []
+        with Session(engine) as sess:
+            all_tags = [t.name for t in sess.query(Tags).all()]
+
+        for resource in resources:
+            result = analyze(resource.url, all_tags)
+            _apply_analysis(resource.url, result)
+            if result.tags:
+                logger.info(
+                    f"Auto-tagged '{resource.title}' with: {', '.join(result.tags)}"
+                )
 
     return [
         {
@@ -200,6 +246,75 @@ def clean(args):
     logger.info(f"Removed {remove_orphaned_topics()} orphaned topics.")
     logger.info(f"Removed {remove_orphaned_tags()} orphaned tags.")
     logger.info(f"Removed {remove_orphaned_authors()} orphaned authors.")
+
+
+_SENTINEL = object()
+
+
+def _build_filter_query(args, base_query, default_accepted=_SENTINEL):
+    """Apply common status/author/since filters to a SQLAlchemy query.
+
+    Args:
+        default_accepted: Accepted value to filter by when no status flag is given.
+                          Use Ellipsis (...) to skip default status filtering.
+    """
+    from datetime import datetime
+
+    from thehackerlibrary.model import Authors
+
+    if args.accepted:
+        base_query = base_query.filter(Resources.accepted == True)
+    elif args.denied:
+        base_query = base_query.filter(Resources.accepted == False)
+    elif args.pending:
+        base_query = base_query.filter(Resources.accepted == None)
+    elif default_accepted is not _SENTINEL:
+        base_query = base_query.filter(Resources.accepted == default_accepted)
+
+    if args.author:
+        base_query = base_query.filter(
+            Resources.authors.any(Authors.name == args.author)
+        )
+
+    if args.since:
+        try:
+            since_date = datetime.strptime(args.since, "%Y-%m-%d")
+        except ValueError:
+            logger.fatal_error("--since date must be in YYYY-MM-DD format.")
+        base_query = base_query.filter(Resources.date >= since_date)
+
+    return base_query
+
+
+def analyze_cmd(args):
+    """Tag posts and evaluate their quality in a single LLM call."""
+    from thehackerlibrary.model import Tags
+    from tqdm import tqdm
+
+    with Session(engine) as sess:
+        all_tags = [t.name for t in sess.query(Tags).all()]
+
+        if args.post:
+            urls = [args.post]
+        else:
+            query = _build_filter_query(
+                args,
+                sess.query(Resources),
+                default_accepted=None,  # default: pending posts
+            )
+            urls = [r.url for r in query.all()]
+
+    tagged_count = 0
+    rejected_count = 0
+    for url in tqdm(urls, desc="Analyzing posts", unit="post"):
+        result = analyze(url, all_tags)
+        _apply_analysis(url, result)
+        if result.tags:
+            tagged_count += 1
+        if not result.accepted:
+            rejected_count += 1
+
+    logger.info(f"Tagged {tagged_count} resource(s), rejected {rejected_count}.")
 
 
 def update(args):
@@ -325,6 +440,63 @@ def main():
         help="Output format (e.g. json, csv, table, yml)",
         default="table",
         choices=["json", "csv", "table", "yml", "yaml"],
+    )
+
+    def _add_ai_filter_args(p, post_help):
+        p.add_argument(
+            "--post", "-p", metavar="URL", type=str, help=post_help,
+        )
+        status = p.add_mutually_exclusive_group()
+        status.add_argument(
+            "--accepted",
+            action="store_true",
+            help=(
+                "Process only posts that have been accepted (approved for the library). "
+                "Without this flag the command does not filter by acceptance state, "
+                "unless the command has its own default (e.g. 'quality' defaults to pending)."
+            ),
+        )
+        status.add_argument(
+            "--denied",
+            action="store_true",
+            help="Process only posts that have been denied/rejected.",
+        )
+        status.add_argument(
+            "--pending",
+            action="store_true",
+            help=(
+                "Process only posts that are still pending review "
+                "(accepted field is NULL in the database)."
+            ),
+        )
+        p.add_argument(
+            "--author",
+            metavar="NAME",
+            type=str,
+            help="Process only posts written by this exact author name.",
+        )
+        p.add_argument(
+            "--since",
+            metavar="YYYY-MM-DD",
+            type=str,
+            help="Process only posts published on or after this date (inclusive).",
+        )
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Tag posts and evaluate their quality using AI.",
+        description=(
+            "Uses the LLM (via LiteLLM) to assign tags and assess quality in a single call. "
+            "Posts that lack technical depth are automatically rejected in the database "
+            "and the reason is logged. "
+            "Defaults to pending posts (accepted = NULL). "
+            "Use --accepted to re-evaluate already-accepted posts, "
+            "or --post to process a single URL directly."
+        ),
+    )
+    _add_ai_filter_args(
+        analyze_parser,
+        post_help="Analyze a single specific post by URL, bypassing the database query.",
     )
 
     list_parser = subparsers.add_parser("ls", help="List resources in the database.")

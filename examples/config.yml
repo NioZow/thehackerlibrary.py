@@ -30,3 +30,7 @@ rules:
   author_by_xpath:
     - xpath: "/html/body/div/div[1]/div[2]/div/h3/a"
       domain: portswigger.net
+litellm:
+  base_url: "http://localhost:4000"
+  api_key: "dummy"
+  model: "claude-sonnet-4-6"

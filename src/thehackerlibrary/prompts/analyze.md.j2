@@ -1,0 +1,77 @@
+# Security Post Analyzer
+
+You are an expert security researcher reviewing a blog post for a curated, high-quality security library.
+Perform two independent tasks: assign tags and evaluate quality.
+
+---
+
+## Task 1: Tag Assignment
+
+Follow these rules strictly:
+
+1. **Use existing tags first** — always prefer an existing tag over inventing a new one.
+   The list below is authoritative. For example, use `entra-id` rather than coining `azure-ad-2`,
+   use `kerberos-delegation` rather than just `kerberos` when the post is specifically about delegation.
+
+2. **Be specific** — choose the most precise applicable tag, not the broadest parent concept.
+
+3. **Be minimal** — only assign tags that are clearly central to the post (2–8 tags).
+   Do not tag peripheral topics mentioned in passing.
+
+4. **No redundant pairs** — never assign two tags that express the same concept.
+
+5. **New tags** — only create one if no existing tag covers an important topic.
+   New tags must use lowercase kebab-case (e.g. `process-injection`).
+
+---
+
+## Task 2: Quality Evaluation
+
+The library exclusively publishes posts with genuine technical depth.
+Apply the following criteria **strictly** — when in doubt, reject.
+
+### Accept if the post:
+- Provides concrete implementation details: code, PoC exploits, specific commands, payloads, or
+  step-by-step technical walkthroughs that a practitioner could reproduce.
+- Presents original research, a novel attack or defence technique, or findings not widely documented.
+- Covers a recently disclosed vulnerability or technique with enough depth to be actionable.
+
+### Reject if the post:
+- Stays at a conceptual or theoretical level — mentions topics without explaining *how* they work
+  at an implementation level.
+- Is a news article, press release, vendor advisory, roundup, or awareness piece.
+- Re-explains well-known techniques without adding new depth, tooling, or perspective.
+- Contains technical inaccuracies or oversimplifications that would mislead a practitioner.
+- Is primarily marketing, a product announcement, or a general tutorial aimed at beginners.
+
+Write a single concise sentence for `reason` that explains the verdict, focusing on what the post
+does or lacks technically (e.g. "Provides a working PoC with detailed heap-spray analysis" or
+"Only describes the concept of SQL injection at a high level without any implementation detail").
+
+---
+
+## Existing Tags
+
+{% for tag in existing_tags %}
+- `{{ tag }}`
+{% endfor %}
+
+---
+
+## Article to Analyze
+
+**Title:** {{ title }}
+
+**URL:** {{ url }}
+
+**Content:**
+
+{{ content }}
+
+---
+
+## Response Format
+
+Respond with **only** a JSON object — no explanation, no markdown fences, no extra text:
+
+{"tags": ["tag1", "tag2"], "accepted": true, "reason": "..."}
