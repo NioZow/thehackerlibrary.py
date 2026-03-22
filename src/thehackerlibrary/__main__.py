@@ -119,6 +119,7 @@ def import_data(args):
 
 def _apply_analysis(url: str, result: AnalysisResult) -> None:
     """Persist tags and/or quality verdict from an AnalysisResult to the database."""
+    import uuid
     from urllib.parse import urlparse
 
     from thehackerlibrary.model import Tags
@@ -140,20 +141,22 @@ def _apply_analysis(url: str, result: AnalysisResult) -> None:
         if not resource:
             return
 
+        added_tags = []
         for tag_name in result.tags:
             tag_obj = sess.query(Tags).filter_by(name=tag_name).first()
-            if not tag_obj:
-                tag_obj = Tags(name=tag_name)
+            if tag_obj is None:
+                tag_obj = Tags(name=tag_name, id=str(uuid.uuid4()))
                 sess.add(tag_obj)
-                logger.info(f"Created new tag: {tag_name}")
             if tag_obj not in resource.tags:
                 resource.tags.append(tag_obj)
+                added_tags.append(tag_name)
+
+        if added_tags:
+            logger.info(f"Tagged '{resource.title}' with: {', '.join(added_tags)}")
 
         if not result.accepted:
             resource.accepted = False
-            logger.warning(
-                f"Rejected '{resource.title}' ({url}): {result.reason}"
-            )
+            logger.warning(f"Rejected '{resource.title}': {result.reason}")
 
         sess.commit()
 
@@ -314,6 +317,9 @@ def _build_filter_query(args, base_query, default_accepted=_SENTINEL):
     elif default_accepted is not _SENTINEL:
         base_query = base_query.filter(Resources.accepted == default_accepted)
 
+    if getattr(args, "no_tags", False):
+        base_query = base_query.filter(~Resources.tags.any())
+
     if args.author:
         base_query = base_query.filter(
             Resources.authors.any(Authors.name == args.author)
@@ -331,8 +337,14 @@ def _build_filter_query(args, base_query, default_accepted=_SENTINEL):
 
 def analyze_cmd(args):
     """Tag posts and evaluate their quality in a single LLM call."""
+    import logging
+
+    from openai import APIConnectionError
+
+    from thehackerlibrary.config import LITELLM_BASE_URL
     from thehackerlibrary.model import Tags
     from tqdm import tqdm
+    from tqdm.contrib.logging import logging_redirect_tqdm
 
     with Session(engine) as sess:
         all_tags = [t.name for t in sess.query(Tags).all()]
@@ -347,15 +359,26 @@ def analyze_cmd(args):
             )
             urls = [r.url for r in query.all()]
 
+    logger.info(f"Analyzing {len(urls)} post(s)...")
+
     tagged_count = 0
     rejected_count = 0
-    for url in tqdm(urls, desc="Analyzing posts", unit="post"):
-        result = analyze(url, all_tags)
-        _apply_analysis(url, result)
-        if result.tags:
-            tagged_count += 1
-        if not result.accepted:
-            rejected_count += 1
+    with logging_redirect_tqdm(loggers=[logging.getLogger("thehackerlibrary")]):
+        for url in tqdm(urls, desc="Analyzing posts", unit="post"):
+            try:
+                result = analyze(url, all_tags)
+                _apply_analysis(url, result)
+            except APIConnectionError:
+                logger.fatal_error(
+                    f"Cannot reach LLM at {LITELLM_BASE_URL} — is the server running?"
+                )
+            except Exception as e:
+                logger.error(f"Unexpected error analyzing {url}: {e}")
+                continue
+            if result.tags:
+                tagged_count += 1
+            if not result.accepted:
+                rejected_count += 1
 
     logger.info(f"Tagged {tagged_count} resource(s), rejected {rejected_count}.")
 
@@ -429,6 +452,11 @@ def _add_filter_args(p, post_help, default_hint=""):
         metavar="YYYY-MM-DD",
         type=str,
         help="Process only posts published on or after this date (inclusive).",
+    )
+    p.add_argument(
+        "--no-tags",
+        action="store_true",
+        help="Process only posts that have no tags assigned.",
     )
 
 

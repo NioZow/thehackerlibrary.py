@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from jinja2 import Environment, FileSystemLoader
 from newspaper import Article
-from openai import OpenAI
+from openai import APIConnectionError, APIError, OpenAI
 
 from thehackerlibrary.config import LITELLM_API_KEY, LITELLM_BASE_URL, LITELLM_MODEL
 from thehackerlibrary.logger import logger
@@ -65,22 +65,39 @@ def analyze(
         existing_tags=sorted(existing_tags),
     )
 
-    logger.info(f"Calling LLM to analyze: {article_title}")
+    logger.info(f"Analyzing: {article_title}")
 
     client = OpenAI(api_key=LITELLM_API_KEY, base_url=LITELLM_BASE_URL)
-    response = client.chat.completions.create(
-        model=LITELLM_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-    )
-    raw = response.choices[0].message.content.strip()
+    try:
+        response = client.chat.completions.create(
+            model=LITELLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+    except APIConnectionError as e:
+        raise
+    except APIError as e:
+        logger.warning(f"LLM API error for {url}: {e}")
+        return AnalysisResult()
+    raw = (response.choices[0].message.content or "").strip()
+
+    if not raw:
+        logger.warning(f"LLM returned empty response for '{article_title}', rejecting.")
+        return AnalysisResult(accepted=False, reason="LLM returned empty response")
 
     try:
         data = json.loads(raw)
         tags = [str(t).strip().lower() for t in data.get("tags", []) if str(t).strip()]
         accepted = bool(data.get("accepted", True))
         reason = str(data.get("reason", ""))
-        return AnalysisResult(tags=tags, accepted=accepted, reason=reason)
+        result = AnalysisResult(tags=tags, accepted=accepted, reason=reason)
+        if not accepted:
+            logger.warning(f"LLM rejected '{article_title}': {reason}")
+        elif tags:
+            logger.info(f"LLM suggested tags for '{article_title}': {', '.join(tags)}")
+        else:
+            logger.info(f"LLM returned no tags for '{article_title}'")
+        return result
     except (json.JSONDecodeError, ValueError, AttributeError) as e:
         logger.warning(f"Failed to parse LLM response for {url}: {e}\nRaw: {raw}")
-        return AnalysisResult()
+        return AnalysisResult(accepted=False, reason="LLM returned unparseable response")
