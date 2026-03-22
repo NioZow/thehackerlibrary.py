@@ -2,9 +2,24 @@ import argparse
 import asyncio
 import csv
 import json
+import os
 import sys
 from functools import wraps
 from pathlib import Path
+
+# Pre-parse --config before any thehackerlibrary import, because config.py
+# executes at module-load time and reads the config file immediately.
+def _pre_parse_config() -> None:
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg in ("--config", "-c") and i + 1 < len(args):
+            os.environ["THEHACKERLIBRARY_CONFIG"] = args[i + 1]
+            break
+        if arg.startswith("--config="):
+            os.environ["THEHACKERLIBRARY_CONFIG"] = arg.split("=", 1)[1]
+            break
+
+_pre_parse_config()
 
 import aiohttp
 import yaml
@@ -33,6 +48,7 @@ from thehackerlibrary.resources import (
     remove_orphaned_sections,
     remove_orphaned_tags,
     remove_orphaned_topics,
+    remove_url_duplicates,
     update_accepted_resources,
 )
 
@@ -267,6 +283,7 @@ def healthcheck(args):
 
 
 def clean(args):
+    logger.info(f"Removed {remove_url_duplicates()} duplicate URLs.")
     logger.info(f"Removed {remove_orphaned_sections()} orphaned sections.")
     logger.info(f"Removed {remove_orphaned_topics()} orphaned topics.")
     logger.info(f"Removed {remove_orphaned_tags()} orphaned tags.")
@@ -412,6 +429,14 @@ def _add_filter_args(p, post_help, default_hint=""):
 
 def main():
     parser = argparse.ArgumentParser(description="TheHackerLibrary cli")
+    parser.add_argument(
+        "--config",
+        "-c",
+        metavar="PATH",
+        type=str,
+        help="Path to the config file (default: ~/.config/thehackerlibrary/config.yml). "
+        "Can also be set via the THEHACKERLIBRARY_CONFIG environment variable.",
+    )
     subparsers = parser.add_subparsers(
         dest="action", help="command to perform", required=True
     )

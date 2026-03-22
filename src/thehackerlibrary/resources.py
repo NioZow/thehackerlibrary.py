@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import List, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from lxml import html
 from newspaper import Article
@@ -17,6 +17,30 @@ from thehackerlibrary.config import (
 )
 from thehackerlibrary.logger import logger
 from thehackerlibrary.model import Authors, Resources, Sections, Tags, Topics
+
+
+# Query parameters that are meaningful identifiers (not tracking noise) per netloc.
+# All other params are stripped; only listed params are kept.
+_PRESERVE_PARAMS: dict[str, set[str]] = {
+    "www.youtube.com": {"v"},
+    "youtube.com": {"v"},
+}
+
+
+def normalize_url(url: str) -> str:
+    """Strip tracking query parameters and fragment from a URL.
+
+    For domains in _PRESERVE_PARAMS, only the listed parameters are kept.
+    For all other domains, the entire query string is removed.
+    """
+    parsed = urlparse(url)
+    preserve = _PRESERVE_PARAMS.get(parsed.netloc)
+    if preserve:
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        filtered = {k: v for k, v in params.items() if k in preserve}
+        new_query = urlencode(filtered, doseq=True)
+        return parsed._replace(query=new_query, fragment="").geturl()
+    return parsed._replace(query="", fragment="").geturl()
 
 
 def get_author_from_xpath(html_content: str, domain: str) -> Optional[str]:
@@ -205,6 +229,8 @@ def add_resource(
     Returns the resource and a boolean telling wether the resource already existed in db (data will not be overwritten).
     """
 
+    url = normalize_url(url)
+
     with Session(engine) as sess:
         resource = sess.query(Resources).filter_by(url=url).first()
         exists = bool(resource)
@@ -342,6 +368,77 @@ def remove_orphaned_topics() -> int:
 
         sess.commit()
         return count
+
+
+def remove_url_duplicates() -> int:
+    """
+    Find resources that share the same URL after stripping query parameters,
+    keep the best one (accepted > pending > denied; earliest date as tiebreaker),
+    merging tags/authors from duplicates, and delete the rest.
+    Returns the number of resources deleted.
+    """
+    from collections import defaultdict
+
+    from sqlalchemy.orm import joinedload
+
+    with Session(engine) as sess:
+        # Eagerly load relationships to avoid autoflush during lazy access
+        all_resources = (
+            sess.query(Resources)
+            .options(joinedload(Resources.authors), joinedload(Resources.tags))
+            .all()
+        )
+
+        groups: dict[str, list] = defaultdict(list)
+        for resource in all_resources:
+            groups[normalize_url(resource.url)].append(resource)
+
+        deleted_count = 0
+        accepted_order = {True: 0, None: 1, False: 2}
+        # Collect (resource, new_url) pairs — applied after deletes are flushed
+        url_updates: list[tuple] = []
+
+        for normalized_url, group in groups.items():
+            if len(group) <= 1:
+                r = group[0]
+                if r.url != normalized_url:
+                    url_updates.append((r, normalized_url))
+                continue
+
+            group.sort(
+                key=lambda r: (
+                    accepted_order.get(r.accepted, 1),
+                    r.date or datetime.max,
+                )
+            )
+
+            keeper = group[0]
+
+            for dup in group[1:]:
+                for author in dup.authors:
+                    if author not in keeper.authors:
+                        keeper.authors.append(author)
+                for tag in dup.tags:
+                    if tag not in keeper.tags:
+                        keeper.tags.append(tag)
+                logger.info(
+                    f"Removing duplicate '{dup.title}' ({dup.url}) — keeping '{normalized_url}'."
+                )
+                sess.delete(dup)
+                deleted_count += 1
+
+            if keeper.url != normalized_url:
+                url_updates.append((keeper, normalized_url))
+
+        # Flush deletes before applying URL updates to avoid unique constraint
+        # violations (the duplicate holding the clean URL must be gone first).
+        sess.flush()
+
+        for resource, new_url in url_updates:
+            resource.url = new_url
+
+        sess.commit()
+        return deleted_count
 
 
 def remove_orphaned_sections() -> int:

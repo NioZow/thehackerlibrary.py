@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import yaml
@@ -8,7 +9,9 @@ from thehackerlibrary.logger import logger
 DATA_DIRECTORY = Path("~/.local/share/thehackerlibrary/").expanduser()
 LOG_FILE = DATA_DIRECTORY / "thehackerlibrary.log"
 CONFIG_DIRECTORY = Path("~/.config/thehackerlibrary").expanduser()
-CONFIG_PATH = CONFIG_DIRECTORY / "config.yml"
+CONFIG_PATH = Path(
+    os.environ.get("THEHACKERLIBRARY_CONFIG", str(CONFIG_DIRECTORY / "config.yml"))
+)
 
 try:
     with open(CONFIG_PATH) as f:
