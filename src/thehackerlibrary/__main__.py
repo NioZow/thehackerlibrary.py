@@ -43,6 +43,7 @@ from thehackerlibrary.media.youtube import get_posts_from_playlist
 from thehackerlibrary.model import Resources, User
 from thehackerlibrary.ai.analyzer import AnalysisResult, analyze
 from thehackerlibrary.resources import (
+    accept_all_pending,
     add_resource,
     remove_orphaned_authors,
     remove_orphaned_sections,
@@ -360,7 +361,11 @@ def analyze_cmd(args):
 
 
 def update(args):
-    update_accepted_resources(dry_run=args.dry_run)
+    if args.accept_pending:
+        count = accept_all_pending()
+        logger.info(f"Accepted {count} pending resource(s).")
+    else:
+        update_accepted_resources(dry_run=args.dry_run)
 
 
 @output_data
@@ -451,6 +456,11 @@ def main():
         "--dry-run",
         action="store_true",
         help="Perform a dry run without making actual changes to the database.",
+    )
+    update_resources_parser.add_argument(
+        "--accept-pending",
+        action="store_true",
+        help="Accept all pending resources unconditionally, bypassing whitelist/blacklist rules.",
     )
 
     healthcheck = subparsers.add_parser(

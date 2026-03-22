@@ -370,6 +370,18 @@ def remove_orphaned_topics() -> int:
         return count
 
 
+def accept_all_pending() -> int:
+    """Set accepted=True on every resource where accepted is NULL.
+    Returns the number of resources updated.
+    """
+    with Session(engine) as sess:
+        resources = sess.query(Resources).filter(Resources.accepted == None).all()
+        for resource in resources:
+            resource.accepted = True
+        sess.commit()
+        return len(resources)
+
+
 def remove_url_duplicates() -> int:
     """
     Find resources that share the same URL after stripping query parameters,
