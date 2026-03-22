@@ -28,7 +28,7 @@ def import_wrapper(table: str):
         def wrapper(self, data: List[Dict] = []):
             if len(data) == 0:
                 with open(self.outdir / f"{table}.yml", "r") as f:
-                    data = yaml.safe_load(f)
+                    data = yaml.safe_load(f) or []
             return func(self, data)
 
         return wrapper
@@ -55,21 +55,26 @@ class Importer:
         self.import_topics()
         self.import_sections()
 
-        try:
-            self.import_rejected_resources()
-            self.import_pending_resources()
-        except Exception as e:
-            logger.warning(f"Failed to load some resources: {e}")
+        for method, filename in [
+            (self.import_rejected_resources, "resources_rejected.yml"),
+            (self.import_pending_resources, "resources_pending.yml"),
+        ]:
+            try:
+                method()
+            except FileNotFoundError:
+                logger.warning(f"{filename} not found, skipping.")
+            except Exception:
+                raise
 
     @import_wrapper("authors")
     def import_authors(self, data: List[Dict] = []):
         with Session(engine) as sess:
             for author_data in data:
-                # check if author already exists
                 existing = sess.query(Authors).filter_by(id=author_data["id"]).first()
-                if not existing:
-                    author = Authors(id=author_data["id"], name=author_data["name"])
-                    sess.add(author)
+                if existing:
+                    existing.name = author_data["name"]
+                else:
+                    sess.add(Authors(id=author_data["id"], name=author_data["name"]))
 
             sess.commit()
 
@@ -77,52 +82,66 @@ class Importer:
     def import_tags(self, data: List[Dict] = []):
         with Session(engine) as sess:
             for tag_data in data:
-                # check if tag already exists
                 existing = sess.query(Tags).filter_by(id=tag_data["id"]).first()
-                if not existing:
-                    tag = Tags(id=tag_data["id"], name=tag_data["name"])
-                    sess.add(tag)
+                if existing:
+                    existing.name = tag_data["name"]
+                else:
+                    sess.add(Tags(id=tag_data["id"], name=tag_data["name"]))
 
             sess.commit()
 
     def _import_resources(self, data: List[Dict] = []):
         with Session(engine) as sess:
             for resource_data in data:
-                # check if resource already exists
+                # Look up by URL first (unique), then fall back to ID.
+                # This handles mismatches where the YAML and DB diverged on
+                # either key independently.
                 existing = (
-                    sess.query(Resources).filter_by(id=resource_data["id"]).first()
+                    sess.query(Resources).filter_by(url=resource_data["url"]).first()
+                    or sess.query(Resources).filter_by(id=resource_data["id"]).first()
                 )
 
-                # TODO: overwrite
-                if not existing:
+                date = (
+                    datetime.strptime(resource_data["date"], "%Y-%m-%d")
+                    if resource_data.get("date")
+                    else None
+                )
+
+                if existing:
+                    existing.type = resource_data["type"]
+                    existing.title = resource_data["title"]
+                    existing.url = resource_data["url"]
+                    existing.date = date
+                    existing.accepted = resource_data["accepted"]
+                    existing.time = resource_data["time"]
+                    resource = existing
+                else:
                     resource = Resources(
                         id=resource_data["id"],
                         type=resource_data["type"],
                         title=resource_data["title"],
                         url=resource_data["url"],
-                        date=datetime.strptime(resource_data["date"], "%Y-%m-%d")
-                        if resource_data.get("date")
-                        else None,
+                        date=date,
                         accepted=resource_data["accepted"],
                         time=resource_data["time"],
                     )
-
                     sess.add(resource)
 
-                    # flush to get the resource ID for relationships
-                    sess.flush()
+                sess.flush()
 
-                    # add authors
-                    for author_id in resource_data.get("authors", []):
-                        author = sess.query(Authors).filter_by(id=author_id).first()
-                        if author:
-                            resource.authors.append(author)
+                # sync authors
+                new_authors = [
+                    sess.query(Authors).filter_by(id=aid).first()
+                    for aid in resource_data.get("authors", [])
+                ]
+                resource.authors = [a for a in new_authors if a is not None]
 
-                    # add tags
-                    for tag_id in resource_data.get("tags", []):
-                        tag = sess.query(Tags).filter_by(id=tag_id).first()
-                        if tag:
-                            resource.tags.append(tag)
+                # sync tags
+                new_tags = [
+                    sess.query(Tags).filter_by(id=tid).first()
+                    for tid in resource_data.get("tags", [])
+                ]
+                resource.tags = [t for t in new_tags if t is not None]
 
             sess.commit()
 
@@ -142,11 +161,11 @@ class Importer:
     def import_paths(self, data: List[Dict] = []):
         with Session(engine) as sess:
             for path_data in data:
-                # check if path already exists
                 existing = sess.query(Paths).filter_by(id=path_data["id"]).first()
-                if not existing:
-                    path = Paths(id=path_data["id"], name=path_data["name"])
-                    sess.add(path)
+                if existing:
+                    existing.name = path_data["name"]
+                else:
+                    sess.add(Paths(id=path_data["id"], name=path_data["name"]))
 
             sess.commit()
 
@@ -154,29 +173,32 @@ class Importer:
     def import_topics(self, data: List[Dict] = []):
         with Session(engine) as sess:
             for topic_data in data:
-                # check if topic already exists
                 existing = sess.query(Topics).filter_by(id=topic_data["id"]).first()
-                if not existing:
-                    topic = Topics(
+                if existing:
+                    existing.tag_id = topic_data["tag_id"]
+                    existing.path_id = topic_data["path_id"]
+                else:
+                    sess.add(Topics(
                         id=topic_data["id"],
                         tag_id=topic_data["tag_id"],
                         path_id=topic_data["path_id"],
-                    )
-                    sess.add(topic)
+                    ))
             sess.commit()
 
     @import_wrapper("sections")
     def import_sections(self, data: List[Dict] = []):
         with Session(engine) as sess:
             for section_data in data:
-                # check if topic already exists
                 existing = sess.query(Sections).filter_by(id=section_data["id"]).first()
-                if not existing:
-                    section = Sections(
+                if existing:
+                    existing.tag_id = section_data["tag_id"]
+                    existing.topic_id = section_data["topic_id"]
+                    existing.priority = section_data["priority"]
+                else:
+                    sess.add(Sections(
                         id=section_data["id"],
                         tag_id=section_data["tag_id"],
                         topic_id=section_data["topic_id"],
                         priority=section_data["priority"],
-                    )
-                    sess.add(section)
+                    ))
             sess.commit()
